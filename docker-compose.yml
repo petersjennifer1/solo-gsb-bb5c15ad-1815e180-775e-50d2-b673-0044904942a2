@@ -7,12 +7,20 @@ services:
       - "8000:8000"
     environment:
       DATA_DIR: /data
+      # SQLite 源库路径：API 服务与归档命令（python -m app.backup create/verify）
+      # 共用同一 DB_PATH；默认即 $DATA_DIR/handoff.db，此处显式写出便于覆盖。
+      DB_PATH: /data/handoff.db
       PORT: "8000"
       # 审计翻页游标的 HMAC 签名密钥：此处仅为**开发默认值**，保证一键启动；
       # 生产部署必须在环境或 .env 中覆盖为强随机值（如 openssl rand -hex 32）。
       AUDIT_CURSOR_SECRET: ${AUDIT_CURSOR_SECRET:-dev-only-audit-cursor-secret-change-me}
     volumes:
       - handoff-data:/data
+    # 数据库归档（容器内执行，在线备份、无需停机；归档随命名卷 handoff-data 持久化）：
+    #   docker compose exec handoff-chain backup create /data/backups/arc-$(date +%Y%m%dT%H%M%SZ)
+    #   docker compose exec handoff-chain backup verify /data/backups/<归档目录名>
+    # 如需把归档放到卷外，可为服务追加宿主机目录挂载（如 ./backups:/backups）
+    # 并把上面的目标目录改为 /backups/<归档目录名>。
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]

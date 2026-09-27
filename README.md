@@ -313,6 +313,73 @@ python -c "from app.database import init_db; init_db()"
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+## 数据库归档（在线备份与只读核验）
+
+服务内置容器内命令 `python -m app.backup`，源库路径沿用 **`DB_PATH`** 配置
+（默认 `/data/handoff.db`，见下方「配置（环境变量）」），**无需停机**即可归档：
+
+- **`create <目录>`**：通过 **SQLite 在线备份机制**（`sqlite3.Connection.backup`）
+  拷贝快照——API 持续写入、WAL 尚未合并时也能得到**完整一致的已提交快照**，源库
+  以只读方式打开、绝不被改动。归档目录内含**独立可读的数据库文件**（已规范化为
+  回滚日志模式，脱离源库 `-wal`/`-shm` 也能直接打开）与 **`manifest.json` 清单**
+  （记录**格式版本**、创建时间、源库路径及各文件 **SHA-256** 与字节数）。
+  整个归档先在**目标父目录内暂存**，完成 `integrity_check`、`foreign_key_check`
+  与五张业务表（`chains` / `events` / `offers` / `offer_witnesses` /
+  `chain_seals`）结构校验后，才**原子 rename 发布**整个归档目录；
+  **目标已存在或与源库路径（含 `-wal`/`-shm`/`-journal` 伴生路径）冲突时拒绝**；
+  任何失败都清理暂存目录，不改动源库与既有归档。
+- **`verify <目录>`**：**只读**核验——清单结构与格式版本、归档条目与清单一致
+  （无缺项、无清单未记录的多余条目）、各文件 SHA-256 与字节数，以及上述三项
+  数据库检查；**损坏或缺项以非零退出码退出并在 stderr 逐条报告具体原因**。
+  核验不在归档目录内产生任何文件（归档目录只读挂载也可核验）。
+- 退出码：`0` 成功；`1` 失败（原因见 stderr）；`2` 命令行用法错误。
+
+归档目录结构：
+
+```
+<归档目录>/
+├── handoff.db       # 独立可读的 SQLite 一致快照（回滚日志模式）
+└── manifest.json    # {"format_version":1, "created_at":…, "source_db_path":…,
+                     #   "database":"handoff.db",
+                     #   "files":{"handoff.db":{"sha256":"…","size_bytes":…}}}
+```
+
+### 归档操作示例
+
+```bash
+# 在运行中的容器内创建归档（在线备份，API 无需停写；
+# 归档落在命名卷 handoff-data 的 /data/backups 下，随卷持久化）
+docker compose exec handoff-chain \
+  backup create /data/backups/arc-$(date +%Y%m%dT%H%M%SZ)
+# [backup] 源数据库: /data/handoff.db
+# [backup] 快照校验通过: integrity_check / foreign_key_check / 五张业务表结构
+# [backup] 归档已发布: /data/backups/arc-20260927T123000Z （handoff.db … 字节, sha256=…）
+
+# 只读核验归档（退出码 0 = 通过；非 0 时 stderr 给出具体原因）
+docker compose exec handoff-chain backup verify /data/backups/arc-20260927T123000Z
+# [verify] 归档核验通过: /data/backups/arc-20260927T123000Z
+
+# 等价地，也可以直接调用模块命令：
+docker compose exec handoff-chain python -m app.backup create /data/backups/arc-2
+
+# 服务未运行时也可归档（另起一个一次性容器，共享同一数据卷）：
+docker compose run --rm handoff-chain backup create /data/backups/arc-3
+
+# 目标已存在或与源库路径冲突会被拒绝，失败自动清理暂存：
+docker compose exec handoff-chain backup create /data/backups/arc-3
+# [backup] 失败: 目标已存在，拒绝覆盖: /data/backups/arc-3   （退出码 1）
+
+# 如需把归档放到卷外：为服务追加宿主机目录挂载（如 ./backups:/backups），
+# 再把目标目录改为 /backups/<归档目录名>。
+
+# 本地（不用 Docker）同样可用，DB_PATH 指向源库即可：
+DB_PATH=./data/handoff.db python -m app.backup create ./backups/arc-1
+DB_PATH=./data/handoff.db python -m app.backup verify ./backups/arc-1
+```
+
+> 归档格式版本（`format_version`，当前为 `1`）与五张业务表结构一一对应；
+> 表结构演进时版本随之递增，`verify` 对不支持的版本会明确报错。
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -999,6 +1066,7 @@ curl -i "http://localhost:8000/chains/ab12.../events/proof?seq=0&seq=1&...&seq=2
 │   ├── service.py     # 哈希链核心逻辑（创建 / 追加 / 邀约确认 / 撤销 / 原子替换 / 见证 / 争议封存 / 查询 / 校验 / Merkle 包含证明与批量 multiproof 的生成与校验）
 │   ├── merkle.py      # Merkle 包含证明纯函数：叶子/内部节点/快照摘要、单事件与批量 multiproof 的构造与离线重算（不读数据库）
 │   ├── database.py    # SQLite 连接、建表与旧 offers 表重建迁移、串行写事务
+│   ├── backup.py      # 数据库归档命令（python -m app.backup）：SQLite 在线备份一致快照 + 清单，校验后原子发布；verify 只读核验
 │   ├── hashing.py     # 紧凑 JSON 规范与 SHA-256
 │   ├── schemas.py     # Pydantic 请求/响应模型
 │   └── config.py      # 路径与端口配置
@@ -1014,7 +1082,7 @@ curl -i "http://localhost:8000/chains/ab12.../events/proof?seq=0&seq=1&...&seq=2
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DATA_DIR` | `/data` | 数据目录 |
-| `DB_PATH` | `$DATA_DIR/handoff.db` | SQLite 文件路径 |
+| `DB_PATH` | `$DATA_DIR/handoff.db` | SQLite 文件路径；API 服务与归档命令 `python -m app.backup create/verify` 均沿用该路径定位源库（Compose 中已显式写为 `/data/handoff.db`，可覆盖） |
 | `PORT` | `8000` | 监听端口（容器内，Compose 映射同为 8000） |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `AUDIT_CURSOR_SECRET` | `dev-only-audit-cursor-secret-change-me`（仅开发默认值） | `GET /audit/events` 翻页游标的 HMAC-SHA256 签名密钥。Compose 与镜像内置同一**开发默认值**保证一键启动，可用同名环境变量或 `.env` 覆盖；**生产部署必须设置为强随机值**（如 `openssl rand -hex 32`）。密钥轮换后此前签发的游标全部返回 400 `invalid_cursor_signature`，重新发起首次查询即可 |

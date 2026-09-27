@@ -1,8 +1,11 @@
 #!/bin/sh
 # 容器入口：
-#   docker-entrypoint.sh init    仅安装后初始化数据库（建表）后退出
-#   docker-entrypoint.sh serve   初始化数据库并启动 API 服务（默认）
-#   docker-entrypoint.sh <cmd>   执行任意命令
+#   docker-entrypoint.sh init              仅安装后初始化数据库（建表）后退出
+#   docker-entrypoint.sh serve             初始化数据库并启动 API 服务（默认）
+#   docker-entrypoint.sh backup <args>     数据库归档/核验：
+#                                          python -m app.backup <args>
+#                                          （如 backup create /data/backups/arc-1）
+#   docker-entrypoint.sh <cmd>             执行任意命令
 set -e
 
 init_db() {
@@ -19,6 +22,11 @@ case "${1:-serve}" in
         init_db
         echo "[entrypoint] 启动服务: http://0.0.0.0:${PORT:-8000}"
         exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}"
+        ;;
+    backup)
+        # 归档/核验只依赖 DB_PATH，不需要先建库；源库不存在时 create 会明确报错
+        shift
+        exec python -m app.backup "$@"
         ;;
     *)
         exec "$@"
