@@ -18,14 +18,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && mkdir -p /data
+    && mkdir -p /data /backups
 
-# 以非 root 用户运行，保证 /data 可写
+# 以非 root 用户运行，保证 /data 与 /backups 可写
 RUN useradd --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /data /app
+    && chown -R appuser:appuser /data /backups /app
 USER appuser
 
-VOLUME ["/data"]
+VOLUME ["/data", "/backups"]
 EXPOSE 8000
 
 ENTRYPOINT ["docker-entrypoint.sh"]

@@ -185,6 +185,9 @@ _OFFERS_REQUIRED_COLUMNS = (
     "replaces", "replaced_by", "replaced_at",
 )
 
+# 五张业务表：备份归档（python -m app.backup）的结构校验以此清单为准
+BUSINESS_TABLES = ("chains", "events", "offers", "offer_witnesses", "chain_seals")
+
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(
@@ -280,6 +283,27 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_offers_replaces ON offers(replaces)"
         )
+
+
+def reference_table_structures() -> dict[str, list[tuple]]:
+    """在内存数据库中按 _SCHEMA 建出参考结构，返回五张业务表的 table_info 行。
+
+    备份归档（python -m app.backup）以此校验快照/归档中的业务表结构：
+    列名、类型、NOT NULL、默认值与主键定义（PRAGMA table_info，按 cid
+    顺序）必须与当前代码建出的参考结构完全一致。结构基准由此处统一给出，
+    避免归档工具另存一份会漂移的表结构副本。
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(_SCHEMA)
+        return {
+            table: [
+                tuple(row) for row in conn.execute(f"PRAGMA table_info({table})")
+            ]
+            for table in BUSINESS_TABLES
+        }
+    finally:
+        conn.close()
 
 
 @contextmanager

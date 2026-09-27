@@ -284,7 +284,8 @@ docker compose up --build
 
 该命令会：构建镜像（其中 `pip install -r requirements.txt` 完成依赖安装）→
 容器启动时自动初始化 SQLite 数据库（自动建表，数据位于命名卷 `handoff-data`，
-库文件 `/data/handoff.db`）→ 启动 API 服务。
+库文件 `/data/handoff.db`）→ 启动 API 服务。归档（备份）默认存放于命名卷
+`handoff-backups`（容器内 `/backups`），见下文「数据库归档」。
 
 ### 访问地址与端口
 
@@ -311,6 +312,54 @@ DATA_DIR=./data python -m app.main        # 自动建库建表后启动
 # 或显式初始化：
 python -c "from app.database import init_db; init_db()"
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+## 数据库归档（在线备份与只读核验）
+
+容器内命令 `python -m app.backup` 提供 `create` 与 `verify` 两个子命令，源库固定取
+**`DB_PATH`**（默认 `/data/handoff.db`，见「配置（环境变量）」），无需停服：
+
+- **`create <目录>`**：用 **SQLite 在线备份机制**（backup API）生成一致快照——
+  API 持续写入、WAL 未合并时快照依然完整一致，且源库以只读方式打开、绝不被改动。
+  归档目录包含**独立可读的数据库** `handoff.db`（快照已转回 delete 日志模式，
+  脱离源库与 WAL 即可只读打开）与**清单** `manifest.json`（记录格式版本
+  `format` / `format_version`、创建时间、各文件 **SHA-256** 与大小、已执行的
+  校验项）。整个归档**先在目标父目录下暂存**，快照通过 `integrity_check`、
+  `foreign_key_check` 与**五张业务表**（chains / events / offers /
+  offer_witnesses / chain_seals）**结构校验**后，才以 `rename` **原子发布**整个
+  归档目录；**目标已存在、或与源库路径（含 `-wal` / `-shm` 伴生文件）冲突时
+  拒绝**；任一步失败即清理暂存目录，不改动源库与任何既有归档。
+- **`verify <目录>`**：**只读**核验既有归档——解析并校验清单（格式、版本、
+  必备条目），逐一重算清单内文件的 SHA-256 并比对大小，拒绝清单之外的文件，
+  再对归档内数据库只读执行 `integrity_check`、`foreign_key_check` 与五张业务表
+  结构校验。全部通过退出码 **0**；任何损坏/缺项以**非零退出码**退出并在
+  stderr 逐条列出具体原因。核验不触碰源库，可在任何挂载了归档的离线环境运行。
+
+```bash
+# 服务运行中创建归档（/backups 为 Compose 命名卷 handoff-backups）
+docker compose exec handoff-chain \
+  python -m app.backup create /backups/handoff-$(date +%Y%m%d-%H%M%S)
+
+# 只读核验归档
+docker compose exec handoff-chain \
+  python -m app.backup verify /backups/handoff-20260927-120000
+
+# 服务未运行时也可用一次性容器执行（同样挂载两个卷）
+docker compose run --rm handoff-chain \
+  python -m app.backup create /backups/handoff-snapshot-1
+
+# 不用 Docker 的本地用法（源库同样取 DB_PATH；目标父目录须已存在）
+mkdir -p ./backups
+DATA_DIR=./data python -m app.backup create ./backups/snap-1
+DATA_DIR=./data python -m app.backup verify ./backups/snap-1
+```
+
+归档目录结构示例：
+
+```
+/backups/handoff-20260927-120000/
+├── handoff.db      # SQLite 一致快照，可独立只读打开
+└── manifest.json   # 格式版本 + 文件 SHA-256/大小 + 校验项清单
 ```
 
 ## API 一览
@@ -996,9 +1045,10 @@ curl -i "http://localhost:8000/chains/ab12.../events/proof?seq=0&seq=1&...&seq=2
 │   ├── main.py        # FastAPI 路由与启动
 │   ├── audit.py       # 交接事件审计检索：快照上界翻页、过滤条件摘要与 HMAC 签名游标
 │   ├── reports.py     # 保管负荷报表：同一读事务固定事件快照，重建持有人区间、裁剪窗口并统计峰值/区间/积分（只读）
+│   ├── backup.py      # 数据库归档命令行：python -m app.backup create/verify（SQLite 在线备份一致快照 + 清单/摘要/结构核验，原子发布）
 │   ├── service.py     # 哈希链核心逻辑（创建 / 追加 / 邀约确认 / 撤销 / 原子替换 / 见证 / 争议封存 / 查询 / 校验 / Merkle 包含证明与批量 multiproof 的生成与校验）
 │   ├── merkle.py      # Merkle 包含证明纯函数：叶子/内部节点/快照摘要、单事件与批量 multiproof 的构造与离线重算（不读数据库）
-│   ├── database.py    # SQLite 连接、建表与旧 offers 表重建迁移、串行写事务
+│   ├── database.py    # SQLite 连接、建表与旧 offers 表重建迁移、串行写事务、业务表参考结构
 │   ├── hashing.py     # 紧凑 JSON 规范与 SHA-256
 │   ├── schemas.py     # Pydantic 请求/响应模型
 │   └── config.py      # 路径与端口配置

@@ -3,6 +3,8 @@
 #   docker-entrypoint.sh init    仅安装后初始化数据库（建表）后退出
 #   docker-entrypoint.sh serve   初始化数据库并启动 API 服务（默认）
 #   docker-entrypoint.sh <cmd>   执行任意命令
+#     （如 python -m app.backup create /backups/<名> 创建数据库归档，
+#       python -m app.backup verify /backups/<名> 只读核验归档）
 set -e
 
 init_db() {
